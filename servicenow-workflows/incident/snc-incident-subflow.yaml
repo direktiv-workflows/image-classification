@@ -1,0 +1,258 @@
+#
+# NOTE: The workflow uses the table_api to manage incidents in Servicenow
+# 
+# Can be an event driven workflow or a subflow invoked workflow. The workflow requires the following input:
+#     Servicenow.com URL: Servicenow.com URL in format https://<service-now-url>.service-now.com
+#     Servicenow.com Username: Servicenow.com username for basic authentication
+#     Servicenow.com Password: Servicenow.com password for basic authentication
+# 
+# Action: Can be any of the following:
+#     - list: Retrieves a list of all incidents from the "incident" table.
+#     - get: Retrieves a specified record from the "incident" table.
+#     - update: Updates a specified record in  the "incident" table.
+#     - create: Creates a record in the "incident" table.
+#     - delete: Deletes a record in the "incident" table.
+#  
+
+description: Service-now.com incident list, create, update or delete workflow
+
+#
+# Define the "request" knative-function to be used for all the Service-now.com 
+# queries and interaction
+#
+
+functions:
+# From https://apps.direktiv.io/search-results/http-request?v=1.0
+- id: http-request
+  image: gcr.io/direktiv/functions/http-request:1.0
+  type: knative-workflow
+
+states:
+#
+# The first state is used to transition to the correct action defined by the "action" JSON input.
+# This is a simple switch state
+#
+- id: transition-action
+  type: switch
+  conditions:
+  - condition: jq(.action == "list")
+    transition: list-incidents
+  - condition: jq(.action == "get")
+    transition: get-incident
+  - condition: jq(.action == "create")
+    transition: create-incident
+  - condition: jq(.action == "update")
+    transition: update-incident
+  - condition: jq(.action == "delete")
+    transition: delete-incident  
+  defaultTransition: exception-catch
+
+#
+# The list incident state is very simple. Requires the username and password and simply lists all
+# of the incidents in the table. The equivalent REST API call for Servicenow.com is:
+#   - https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/c_TableAPI#table-GET
+#
+- id: list-incidents
+  type: action
+  log: jq(.)
+  action:
+    function: http-request
+    input:
+      debug: false
+      method: GET
+      url: 'jq(.sncurl)/api/now/table/incident'
+      params:
+        # In the params fields, users can add specific parameters to filter on. Below are a couple of examples to use:
+        # active: true
+        # state: closed
+        sysparm_display_value: "false" # Options are true, false or all
+        sysparm_exclude_reference_link: "false" # Flag that indicates whether to exclude Table API links for reference fields
+        # sysparm_fields:  # Comma-separated list of fields to return in the response, default returns all
+        sysparm_limit: "100" # Maximum number of records to return
+        sysparm_no_count: "true" # Flag that indicates whether to execute a select count(*) query on the table to return the number of rows in the associated table.
+        sysparm_offset: "0" # Starting record index for which to begin retrieving records
+        # sysparm_query: # Encoded query used to filter the result set. You can use a UI filter to obtain a properly encoded query.
+        # sysparm_query_category: # Name of the category to use for queries.
+        sysparm_query_no_domain: "false" # Flag that indicates whether to restrict the record search to only the domains for which the logged in user is configured
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      username: jq(.sncusername)
+      password: jq(.sncpassword)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  transform: jq(.return[0])
+  catch:
+    - error: "*"
+      transition: exception-catch
+
+#
+# The get incident state is very simple. Requires the username and password and simply gets a specific
+# incident in the table based on a sys_id for the incident. The equivalent REST API call for Servicenow.com is:
+#   - https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/c_TableAPI#table-GET-id
+#
+- id: get-incident
+  type: action
+  log: jq(.)
+  action:
+    function: http-request
+    input:
+      debug: false
+      method: GET
+      url: 'jq(.sncurl)/api/now/table/incident/jq(.incident_sys_id)'
+      params:
+        # In the params fields, users can add specific parameters to filter on. Below are a couple of examples to use:
+        # active: true
+        # state: closed
+        sysparm_display_value: "false" # Options are true, false or all
+        sysparm_exclude_reference_link: "false" # Flag that indicates whether to exclude Table API links for reference fields
+        # sysparm_fields:  # Comma-separated list of fields to return in the response, default returns all
+        sysparm_limit: "10" # Maximum number of records to return
+        sysparm_no_count: "true" #Flag that indicates whether to execute a select count(*) query on the table to return the number of rows in the associated table.
+        sysparm_offset: "0" # Starting record index for which to begin retrieving records
+        # sysparm_query: # Encoded query used to filter the result set. You can use a UI filter to obtain a properly encoded query.
+        # sysparm_query_category: # Name of the category to use for queries.
+        sysparm_query_no_domain: "false" # Flag that indicates whether to restrict the record search to only the domains for which the logged in user is configured
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      username: jq(.sncusername)
+      password: jq(.sncpassword)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  transform: jq(.return[0])
+  catch:
+    - error: "*"
+      transition: exception-catch
+
+#
+# The incident state requires the username and password and simply creates a new
+# incident in the table based on a information provided. The equivalent REST API call for Servicenow.com is:
+#   - https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/c_TableAPI#table-POST
+#
+- id: create-incident
+  type: action
+  log: jq(.)
+  action:
+    function: http-request
+    input:
+      debug: false
+      method: POST
+      url: 'jq(.sncurl)/api/now/table/incident'
+      params:
+        # In the params fields, users can add specific parameters to filter on. Below are a couple of examples to use:
+        # active: true
+        # state: closed
+        sysparm_display_value: "false" # Options are true, false or all
+        sysparm_exclude_reference_link: "false" # Flag that indicates whether to exclude Table API links for reference fields
+        # sysparm_fields:  # Comma-separated list of fields to return in the response, default returns all
+        sysparm_input_display_value: "false" # Flag that indicates whether to set field values using the display value or the actual value.
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      username: jq(.sncusername)
+      password: jq(.sncpassword)
+      content:
+        value: jq(.content)
+          # The values below are examples only, every servicenow instance is different - PLEASE REMEMBER TO CONTACT YOUR SNC ADMINISTRATOR
+          # TO GET THE REQUIRED FIELDS
+          # description: 'jq(.description)' # Free form string to add description (long - detailed)
+          # impact: 'jq(.impact)' # Number ranging from 1 - High to 3 - Low
+          # severity: 'jq(.severity)' # Number ranging from 1 - High to 3 - Low
+          # short_description: 'jq(.short_description)' # Free form string to add description (long - detailed)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  transform: jq(.return[0])
+  catch:
+    - error: "*"
+      transition: exception-catch
+
+#
+# The incident state requires the username and password and simply updates an existing
+# incident in the table based on a information provided. The equivalent REST API call for Servicenow.com is:
+#   - https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/c_TableAPI#table-PATCH
+#
+- id: update-incident
+  type: action
+  log: jq(.)
+  action:
+    function: http-request
+    input:
+      debug: false
+      method: PATCH
+      url: 'jq(.sncurl)/api/now/table/incident/jq(.incident_sys_id)'
+      params:
+        # sysparm_fields:  # Comma-separated list of fields to return in the response, default returns all
+        # In the params fields, users can add specific parameters to filter on. Below are a couple of examples to use:
+        # active: true
+        # state: closed
+        sysparm_display_value: "false" # Options are true, false or all
+        sysparm_input_display_value: "false" # Flag that indicates whether to set field values using the display value or the actual value.
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      username: jq(.sncusername)
+      password: jq(.sncpassword)
+      content:
+        value: jq(.content)
+        # value:
+        #   # The values below are examples only, every servicenow instance is different - PLEASE REMEMBER TO CONTACT YOUR SNC ADMINISTRATOR
+        #   # TO GET THE REQUIRED FIELDS
+        #   description: 'jq(.description)' # Free form string to add description (long - detailed)
+        #   impact: 'jq(.impact)' # Number ranging from 1 - High to 3 - Low
+        #   severity: 'jq(.severity)' # Number ranging from 1 - High to 3 - Low
+        #   short_description: 'jq(.short_description)' # Free form string to add description (long - detailed)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  transform: jq(.return[0])
+  catch:
+    - error: "*"
+      transition: exception-catch
+
+#
+# The incident state requires the username and password and simply deletes an existing incident
+# in the table based on a sys_id provided. The equivalent REST API call for Servicenow.com is:
+#   - https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/c_TableAPI#table-DELETE
+#
+- id: delete-incident
+  type: action
+  log: jq(.)
+  action:
+    function: http-request
+    input:
+      debug: false
+      method: DELETE
+      url: 'jq(.sncurl)/api/now/table/incident/jq(.incident_sys_id)'
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      username: jq(.sncusername)
+      password: jq(.sncpassword)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  transform: jq(.return[0])
+  catch:
+    - error: "*"
+      transition: exception-catch
+
+#
+# Handle any failed connections
+#
+- id: exception-catch
+  type: noop
+  log: jq(.)

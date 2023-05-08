@@ -1,0 +1,194 @@
+# Example workflow: 'Check image uploaded to Azure Blob Storage for SFW/NSFW'
+# 
+#
+# This workflow will be started based on a Microsoft.Storage.BlobCreate event
+# being received. It will process the image being uploaded using Google Vision,
+# add a watermark using a Python function and then move the watermarked image
+# to the correct container in Azure
+#
+#
+# TOKEN: <direktiv-token>
+# 
+#
+
+description: "Classify an image uploaded to Azure Blob Storage as SFW or NSFW using Google Vision, Python and Azure Storage functions"
+
+start:
+  type: event
+  state: google-vision-classify
+  event:
+    type: Microsoft.Storage.BlobCreated
+
+functions:
+  # This function uses the Google Vision API to classify the image
+  - id: google-vision
+    image: vorteil/imagerecognition:latest
+    type: reusable
+  # This function runs a serverless Python container to modify the image
+  - id: python
+    image: gcr.io/direktiv/functions/python:1.0
+    type: knative-workflow
+  # This function is used to create the email template sent as HTML
+  - id: email-template
+    image: gcr.io/direktiv/functions/mustache:1.0
+    type: knative-workflow
+  # This function sends the email
+  - id: send-email
+    image: gcr.io/direktiv/functions/sendmail:1.0
+    type: knative-workflow
+  # This uploads the image back into the Azure Bucket and moves the image to the correct bucket based on the classification
+  - id: azure-cli
+    image: gcr.io/direktiv/functions/azure:1.0
+    type: knative-workflow
+  
+states:
+  #
+  # The first state is activated when the Azure Storage Blob created event is received. This state tries to 
+  # run an image classification against the Google Vision API. 
+  #    Note: there is a conditional loop created here as the Azure Blob Storage object isn't always available when the event
+  #    is received. In this case we're tasking Direktiv with verifying the success of the command
+  - id: google-vision-classify
+    type: action
+    action:
+      secrets: ["GCP_KEY"]
+      function: google-vision
+      input:
+        url: 'jq(."Microsoft.Storage.BlobCreated".data.url)'
+        serviceAccountKey: jq(.secrets.GCP_KEY)
+    transition: check-rating-for-image
+    transform: jq(.gvision = .return | del(.return))
+    catch:
+    - error: "com.imagerecognition.error"
+      transition: check-error
+
+  # 
+  # The state checks for the DeadLineExceed error returned from Google Vision API
+  #    
+  - id: check-error
+    log: jq(.)
+    type: switch
+    conditions:
+    - condition: 'jq(.error.msg | test("DeadlineExceeded"))'
+      transition: google-vision-classify
+    defaultTransition: exception-catch
+
+  # 
+  # The state checks the rating returned by the Google Vision API
+  #  
+  - id: check-rating-for-image
+    log: jq(.)
+    type: switch
+    conditions:
+    - condition: 'jq(.gvision.safeForWork == true)'
+      transition: add-watermark
+      transform: 'jq(. + { msg: "Approved by Direktiv", approved: true })'
+    defaultTransition: add-watermark
+    defaultTransform: 'jq(. + { msg: "NOT Approved by Direktiv", approved: false })'
+
+  # 
+  # Now we're adding the watermark using a Python serverless code executor
+  #   
+  - id: add-watermark
+    type: action
+    action: 
+      function: python
+      files:
+      - key: add-watermark.py
+        scope: workflow
+      - key: requirements.txt
+        scope: workflow
+      - key: Roboto-Black.ttf
+        scope: workflow
+      input:
+        commands:
+        - command: pyenv local 3.8.13
+        - command: python3 -m pip install -r requirements.txt
+          silent: true
+        - command: python3 add-watermark.py -i jq(."Microsoft.Storage.BlobCreated".data.url) -m "jq(.msg)" -o temp-jq(."Microsoft.Storage.BlobCreated".data.url | capture("(?<filename>[a-z.]+$)").filename)
+          silent: true
+        - command: bash -c 'cp temp-jq(."Microsoft.Storage.BlobCreated".data.url | capture("(?<filename>[a-z.]+$)").filename) out/instance/jq(."Microsoft.Storage.BlobCreated".data.url | capture("(?<filename>[a-z.]+$)").filename)'
+    transform: 'jq(.event = ."Microsoft.Storage.BlobCreated".data | del(.return) | del(."Microsoft.Storage.BlobCreated"))'
+    transition: create-email-template
+    catch:
+    - error: "*"
+      transition: exception-catch
+  #
+  # Create the email content using an email template 
+  #
+  - id: create-email-template
+    # log: jq(.)
+    log: Creating the email template
+    type: action
+    action:
+      function: email-template
+      files:
+      - key: notify-processed.tpl
+        scope: workflow
+      input: 
+        template: notify-processed.tpl
+        data: 'jq(.)'
+    transition: send-email
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Send an unencrypted email message with the attachments.
+  #
+  - id: send-email
+    log: Sending email to owner of volumes and instances
+    type: action
+    action:
+      secrets: ["EMAIL_USER", "EMAIL_PASSWORD"]
+      function: send-email
+      input: 
+        smtp:
+          server: smtp.gmail.com:587
+          user: jq(.secrets.EMAIL_USER)
+          password: jq(.secrets.EMAIL_PASSWORD)
+        emails:
+        - from: Wilhelm Wonigkeit<wilhelm.wonigkeit@direktiv.io>
+          to:
+          - wilhelm.wonigkeit@direktiv.io
+          subject: 'Image processed: jq(.event.url)'
+          message:
+            name: message
+            data: 'jq(.return.mustache.result)'
+          contentType: text/html
+    transition: upload-image
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Upload the image back into Azure Storage using the azure cli command and delete the old file
+  #
+  - id: upload-image
+    type: action
+    # log: jq(.)
+    action:
+      function: azure-cli
+      secrets: ["AZ_USER", "AZ_PASSWORD", "AZ_TENANT", "AZ_STORAGE_ACCOUNT"]
+      files:
+        - key: jq(.event.url | capture("(?<filename>[a-z.]+$)").filename)
+          scope: instance
+      input:
+        auth:
+          user: jq(.secrets.AZ_USER)
+          password: jq(.secrets.AZ_PASSWORD)
+          tenant: jq(.secrets.AZ_TENANT)
+        commands:
+        - command: ls -la
+        - command: az storage blob upload --account-name jq(.secrets.AZ_STORAGE_ACCOUNT) -f jq(.event.url | capture("(?<filename>[a-z.]+$)").filename) -c jq(if .approved == true then "sfw" else "nsfw" end) --overwrite
+        - command: az storage blob delete --account-name jq(.secrets.AZ_STORAGE_ACCOUNT) -n 'jq(.event.url | capture("(?<filename>[a-z.]+$)").filename)' -c upload
+        
+  #
+  # Handle any failed connections
+  #
+  - id: exception-catch
+    log: 'Failed with the following: jq(.) - creating an incident'
+    type: generateEvent
+    event: 
+      type: com.direktiv.exception.create.incident
+      source: classify-images
+      data: jq(.error)

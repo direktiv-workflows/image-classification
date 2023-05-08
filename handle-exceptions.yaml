@@ -1,0 +1,41 @@
+# 
+# This is the workflow used to delete the AWS Volumes. The workflow only starts
+# when it receives the 
+#
+
+description: Workflow to delete the AWS volumes when approval is received
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# vault workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: create-incident
+  event:
+    type: com.direktiv.exception.create.incident
+
+functions:
+  - id: run-incident
+    type: subflow
+    workflow: servicenow-workflows/incident/snc-incident-subflow
+#
+# Handle any failed connections
+#
+states:
+  - id: create-incident
+    log: 'Failed with the following: jq(.) - creating an incident'
+    type: action
+    action:
+      function: run-incident
+      secrets: ["SNC_URL","SNC_USER","SNC_PASSWORD"]
+      input:
+        sncurl: jq(.secrets.SNC_URL)
+        sncusername: jq(.secrets.SNC_USER)
+        sncpassword: jq(.secrets.SNC_PASSWORD)
+        action: "create"
+        content:
+          description: 'jq(. |tostring)'
+          impact: 3
+          severity: 1
+          short_description: "Direktiv Equinix Demo: incident created for failure or exception"
